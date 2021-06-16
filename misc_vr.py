@@ -12,6 +12,52 @@ from reprint import output
 from colorama import Fore, Back, Style
 import openvr
 
+def get_controller_ids(vrsys=None):
+    if vrsys is None:
+        vrsys = openvr.VRSystem()
+    else:
+        vrsys = vrsys
+    left = None
+    right = None
+    for i in range(openvr.k_unMaxTrackedDeviceCount):
+        device_class = vrsys.getTrackedDeviceClass(i)
+        if device_class == openvr.TrackedDeviceClass_Controller:
+            role = vrsys.getControllerRoleForTrackedDeviceIndex(i)
+            if role == openvr.TrackedControllerRole_RightHand:
+                right = i
+            if role == openvr.TrackedControllerRole_LeftHand:
+                left = i
+    return left, right
+
+
+def from_controller_state_to_dict(pControllerState):
+    # docs: https://github.com/ValveSoftware/openvr/wiki/IVRSystem::GetControllerState
+    d = {}
+    d['unPacketNum'] = pControllerState.unPacketNum
+    # on trigger .y is always 0.0 says the docs
+    d['trigger'] = pControllerState.rAxis[1].x
+    # 0.0 on trigger is fully released
+    # -1.0 to 1.0 on joystick and trackpads
+    d['trackpad_x'] = pControllerState.rAxis[0].x
+    d['trackpad_y'] = pControllerState.rAxis[0].y
+    # These are published and always 0.0
+    # for i in range(2, 5):
+    #     d['unknowns_' + str(i) + '_x'] = pControllerState.rAxis[i].x
+    #     d['unknowns_' + str(i) + '_y'] = pControllerState.rAxis[i].y
+    d['ulButtonPressed'] = pControllerState.ulButtonPressed
+    d['ulButtonTouched'] = pControllerState.ulButtonTouched
+    # To make easier to understand what is going on
+    # Second bit marks menu button
+    d['menu_button'] = bool(pControllerState.ulButtonPressed >> 1 & 1)
+    # 32 bit marks trackpad
+    d['trackpad_pressed'] = bool(pControllerState.ulButtonPressed >> 32 & 1)
+    d['trackpad_touched'] = bool(pControllerState.ulButtonTouched >> 32 & 1)
+    # third bit marks grip button
+    d['grip_button'] = bool(pControllerState.ulButtonPressed >> 2 & 1)
+    # System button can't be read, if you press it
+    # the controllers stop reporting
+    return d
+
 print(Back.CYAN + Fore.WHITE + Style.BRIGHT +
 """                            \n      OpenVR OSC 1.0        \n                            \n"""
  + Style.RESET_ALL)
@@ -51,6 +97,7 @@ if __name__ == "__main__":
 
     # initialize OSC client
     client = udp_client.SimpleUDPClient(args.ip, args.port)
+    print(client)
 
     # print some stuff
     print(Fore.GREEN + "\rSending OSC tracking data on " + args.ip + ":" + str(args.port), end="\n\n")
@@ -73,7 +120,7 @@ if __name__ == "__main__":
         print("Control+C pressed, shutting down...")
         openvr.shutdown()
 
-
+    time.sleep(10.0)
     while(True):
         start = time.time()
 
@@ -91,37 +138,64 @@ if __name__ == "__main__":
 
         # iterate over tracked device types and build OSC messages
         di = 0
-        for deviceType in args.track:
-            for device in devices[deviceType]:
+        try:
+            for deviceType in args.track:
+                for device in devices[deviceType]:
+                    # get device post
+                    pose = device.get_pose_euler()
 
-                # get device post
-                pose = device.get_pose_euler()
+                    # Build message and add to bundle
+                    msg = osc_message_builder.OscMessageBuilder(address="/" + deviceType + "/" + device._id)
+                    # msg.add_arg(device.get_pose_euler())
+                    
+                    msg.add_arg(pose[0]) # X
+                    msg.add_arg(pose[1]) # Y
+                    msg.add_arg(pose[2]) # Z
+                    msg.add_arg(pose[3]) # Yaw
+                    msg.add_arg(pose[4]) # Pitch
+                    msg.add_arg(pose[5]) # Roll
 
-                # Build message and add to bundle
-                msg = osc_message_builder.OscMessageBuilder(address="/" + deviceType + "/" + device._id)
-                # msg.add_arg(device.get_pose_euler())
-                msg.add_arg(pose[0]) # X
-                msg.add_arg(pose[1]) # Y
-                msg.add_arg(pose[2]) # Z
-                msg.add_arg(pose[3]) # Yaw
-                msg.add_arg(pose[4]) # Pitch
-                msg.add_arg(pose[5]) # Roll
+                    if deviceType == 'controller':
+                        result, pControllerState = vrsystem.getControllerState(int(device._id))
+                        # result, pControllerState = vrsystem.getControllerState(left_id)
+                        d = from_controller_state_to_dict(pControllerState)
+                        print(d)
+                        # on trigger .y is always 0.0 says the docs
+                        msg.add_arg(d['trigger'])
+                        # 0.0 on trigger is fully released
+                        # -1.0 to 1.0 on joystick and trackpads
+                        msg.add_arg(d['trackpad_x'])
+                        msg.add_arg(d['trackpad_y'])
+                        # These are published and always 0.0
+                        # for i in range(2, 5):
+                        #     d['unknowns_' + str(i) + '_x'] = pControllerState.rAxis[i].x
+                        #     d['unknowns_' + str(i) + '_y'] = pControllerState.rAxis[i].y
+                        msg.add_arg(d['ulButtonPressed']/8589934592)
+                        print(type(d['ulButtonTouched']))
+                        msg.add_arg(d['ulButtonTouched']/8589934592)
+                        # To make easier to understand what is going on
+                        # Second bit marks menu button
+                        msg.add_arg(d['menu_button'])
+                        # 32 bit marks trackpad
+                        msg.add_arg(d['trackpad_pressed'])
+                        msg.add_arg(d['trackpad_touched']/4294967296)
+                        # third bit marks grip button
+                        msg.add_arg(d['grip_button'])
+                        
+                    bundle.add_content(msg.build())
 
-                if devices == 'controller':
-                    result, pControllerState = vrsystem.getControllerState(device._id)
-                    d = from_controller_state_to_dict(pControllerState)
-                    msg.add_arg(d)
+                    # print(pose)
 
-                bundle.add_content(msg.build())
+                    di += 1
 
-                print(pose)
+            # Send the bundle
+            client.send(bundle.build())
 
-                di += 1
-
-        # Send the bundle
-        client.send(bundle.build())
+        except:
+            pass
 
         # wait for next tick
         sleep_time = interval-(time.time()-start)
         if sleep_time>0:
             time.sleep(sleep_time)
+            # time.sleep(1)
